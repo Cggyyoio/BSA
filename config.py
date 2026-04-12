@@ -2,7 +2,7 @@
 #              إعدادات البوت - config.py
 # ═══════════════════════════════════════════════
 
-BOT_TOKEN  = "8129933191:AAGCzT-TmGBeHW2bnfriEyvSWH-KgzP_r_0"
+BOT_TOKEN  = "6234012778:AAGOhCdPXGYVOXnjkHbWFmFkLdsG4gHpp3E"
 ADMIN_ID   = 8168134514
 ADMIN_USERNAME = "smmalmasry"   # بدون @
 CHANNEL_ID = ""                          # قناة الإشعارات (اختياري)
