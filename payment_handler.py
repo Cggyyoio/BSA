@@ -143,6 +143,151 @@ class PaymentHandler:
             net = "bep20" if d.endswith("bep20") else "trc20"
             await self._get_crypto().handle_copy_address(call, net)
         elif d in ("binance_enter_amount", "binance_enter_order"):
+"""
+╔══════════════════════════════════════════════════════════════╗
+║           نظام الدفع - payment_handler.py  v3.1             ║
+║           يدعم: BEP20/TRC20 تلقائي + يدوي + هدايا           ║
+╚══════════════════════════════════════════════════════════════╝
+"""
+
+import logging
+from telebot import types
+from config import ADMIN_ID, ADMIN_USERNAME
+
+logger = logging.getLogger(__name__)
+
+_WAITING_PROOF: dict[int, dict] = {}
+
+class PaymentHandler:
+    def __init__(self, db, bot):
+        self.db       = db
+        self.bot      = bot
+        self._binance = None
+        self._crypto  = None
+
+    def _get_binance(self):
+        if self._binance is None:
+            try:
+                from binance_pay import BinancePayHandler
+                self._binance = BinancePayHandler(self.db, self.bot)
+            except ImportError:
+                self._binance = False
+        return self._binance if self._binance is not False else None
+
+    def _get_crypto(self):
+        if self._crypto is None:
+            from crypto_pay import CryptoPayHandler
+            self._crypto = CryptoPayHandler(self.db, self.bot)
+        return self._crypto
+
+    async def show_charge_menu(self, chat_id: int):
+        settings = self.db.get_payment_settings()
+        kb       = types.InlineKeyboardMarkup(row_width=2)
+
+        manual_methods = [
+            ("vodafone", "📱 فودافون كاش"),
+            ("crypto",   "🔐 طرق دفع اخري"),
+            ("usdt",     "💎 USDT (يدوي)"),
+        ]
+        btns = []
+        for key, label in manual_methods:
+            enabled = settings.get(key, True)
+            suffix  = " ⛔" if not enabled else ""
+            btns.append(types.InlineKeyboardButton(
+                f"{label}{suffix}", callback_data=f"pay_{key}"
+            ))
+        kb.add(*btns)
+
+        cr = self._get_crypto()
+        if cr.is_bep20_enabled():
+            kb.add(types.InlineKeyboardButton("💎 USDT BEP20 — تلقائي ⚡", callback_data="pay_bep20_auto"))
+        else:
+            kb.add(types.InlineKeyboardButton("💎 USDT BEP20 ⛔", callback_data="pay_bep20_auto"))
+
+        if cr.is_trc20_enabled():
+            kb.add(types.InlineKeyboardButton("🟣 USDT TRC20 — تلقائي ⚡", callback_data="pay_trc20_auto"))
+        else:
+            kb.add(types.InlineKeyboardButton("🟣 USDT TRC20 ⛔", callback_data="pay_trc20_auto"))
+
+        bp = self._get_binance()
+        if bp and bp.is_enabled():
+            kb.add(types.InlineKeyboardButton("💛 Binance Pay — تلقائي ⚡", callback_data="pay_binance_auto"))
+        elif bp is not None:
+            kb.add(types.InlineKeyboardButton("💛 Binance Pay ⛔", callback_data="pay_binance_auto"))
+
+        kb.add(types.InlineKeyboardButton("🎁 كود هدية", callback_data="pay_gift"))
+        kb.add(types.InlineKeyboardButton("👨‍💼 التواصل مع الأدمن", url=f"https://t.me/{ADMIN_USERNAME}"))
+
+        await self.bot.send_message(
+            chat_id,
+            "┌─────────────────────────────┐\n"
+            "│       💳 شحن الرصيد          │\n"
+            "└─────────────────────────────┘\n\n"
+            "اختر طريقة الدفع:\n"
+            "⚡ = تلقائي فوري | ⛔ = متوقف مؤقتاً",
+            reply_markup=kb
+        )
+
+    async def handle_pay_callback(self, call):
+        method = call.data.replace("pay_", "")
+        cid    = call.message.chat.id
+        uid    = call.from_user.id
+
+        if method == "binance_auto":
+            await self.bot.answer_callback_query(call.id)
+            bp = self._get_binance()
+            if not bp or not bp.is_enabled():
+                await self.bot.answer_callback_query(call.id, "⛔ Binance Pay متوقف حالياً.", show_alert=True)
+                return
+            await bp.show_binance_pay(cid, uid)
+            return
+
+        if method == "bep20_auto":
+            await self.bot.answer_callback_query(call.id)
+            cr = self._get_crypto()
+            if not cr.is_bep20_enabled():
+                await self.bot.answer_callback_query(call.id, "⛔ USDT BEP20 غير مفعّل.", show_alert=True)
+                return
+            await cr.show_pay_page(cid, uid, "bep20")
+            return
+
+        if method == "trc20_auto":
+            await self.bot.answer_callback_query(call.id)
+            cr = self._get_crypto()
+            if not cr.is_trc20_enabled():
+                await self.bot.answer_callback_query(call.id, "⛔ USDT TRC20 غير مفعّل.", show_alert=True)
+                return
+            await cr.show_pay_page(cid, uid, "trc20")
+            return
+
+        if method == "gift":
+            await self.bot.answer_callback_query(call.id)
+            await self.bot.send_message(cid, "🎁 <b>أرسل كود الهدية:</b>")
+            _WAITING_PROOF[uid] = {"type": "gift"}
+            return
+
+        settings = self.db.get_payment_settings()
+        enabled  = settings.get(method, True)
+        if not enabled:
+            await self.bot.answer_callback_query(call.id, "⛔ هذه الطريقة متوقفة حالياً!", show_alert=True)
+            return
+        await self.bot.answer_callback_query(call.id)
+        await self._show_payment_details(cid, call.message.message_id, method)
+
+    async def handle_send_proof_callback(self, call):
+        d = call.data
+        try:
+            await self.bot.answer_callback_query(call.id)
+        except Exception:
+            pass
+
+        if d.startswith("crypto_sent_"):
+            net = "bep20" if d.endswith("bep20") else "trc20"
+            await self._get_crypto().prompt_txid(call, net)
+        elif d.startswith("crypto_copy_"):
+            net = "bep20" if d.endswith("bep20") else "trc20"
+            await self._get_crypto().handle_copy_address(call, net)
+        elif d in ("binance_enter_amount", "binance_enter_order"):
             bp = self._get_binance()
             if bp:
                 await bp.prompt_amount(call)
@@ -157,13 +302,12 @@ class PaymentHandler:
                 "📱 <b>فودافون كاش</b>\n\n"
                 f"📲 رقم التحويل: <code>{self.db.get_setting('vodafone_number','01002495127')}</code>\n\n"
                 "1️⃣ قم بنسخ الرقم\n"
-                "2️⃣ ثم قم بتحويل المبلغ للرقم \n"
-                "3️⃣ ثم أكد العمليه \n"
-                "4️⃣ اضغط <b>إرسال الإيصال</b> ثم ارسل صورة التحويل ورقمك المحول منه"
-                "5️⃣ ثم انتظر تأكيد عملية الدفع من الاداره يدويا" 
+                "2️⃣ قم بتحويل المبلغ للرقم\n"
+                "3️⃣ اكد العمليه\n"
+                "4️⃣ اضغط <b>إرسال الإيصال</b> وأرسل الصورة ورقم الهاتف  المحول منه وانتظر تاكيد الدفع يدويا"
             ),
             "crypto": (
-                "🔐 <b>  طرق دفع اخري</b>\n\n"
+                "🔐 <b>كريبتو (يدوي)</b>\n\n"
                 f"📋 العنوان: <code>{self.db.get_setting('crypto_address','...')}</code>\n"
                 "الشبكة: TRC20 / ERC20\n\n"
                 "بعد الإرسال اضغط <b>إرسال الإيصال</b> وأرسل TXID أو صورة."
