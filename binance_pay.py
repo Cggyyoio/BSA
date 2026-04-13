@@ -1,9 +1,7 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║        نظام الدفع بينانس - binance_pay.py  v3.0             ║
-║  الإصلاحات:                                                  ║
-║  ✅ إصلاح نهائي لمضاعفة الرصيد (إضافة واحدة فقط)           ║
-║  ✅ فحص حالة الطلب قبل الإضافة                               ║
+║        نظام الدفع بينانس - binance_pay.py  v3.1             ║
+║  متوافق بالكامل مع البوت الحالي - بدون تعديلات خارجية       ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -25,7 +23,6 @@ API_RETRY_DELAY         = 2
 API_TIMEOUT_SECONDS     = 15
 
 _BINANCE_SESSIONS: dict[int, dict] = {}
-# مجموعة Order IDs المستخدمة في الذاكرة (خط دفاع أول)
 _USED_ORDER_IDS: set[str] = set()
 
 
@@ -155,7 +152,6 @@ class BinancePayHandler:
             self.db.get_setting("pay_binance",     "0") == "1"
             and bool(self.db.get_setting("binance_api_key",    "").strip())
             and bool(self.db.get_setting("binance_api_secret", "").strip())
-            and bool(self.db.get_setting("binance_pay_id",     "").strip())
         )
 
     def in_session(self, uid: int) -> bool:
@@ -165,20 +161,21 @@ class BinancePayHandler:
         """فحص مزدوج: ذاكرة + قاعدة بيانات"""
         if order_id in _USED_ORDER_IDS:
             return True
-        row = self.db.get_binance_payment(order_id)
-        if row:
+        # استخدام دالة get_binance_payment من database.py
+        if hasattr(self.db, 'get_binance_payment') and self.db.get_binance_payment(order_id):
             _USED_ORDER_IDS.add(order_id)
             return True
         return False
 
     def _mark_order_used(self, uid: int, order_id: str, paid: float, credit: float):
-        """تسجيل Order ID فقط — بدون إضافة رصيد هنا"""
+        """تسجيل Order ID فقط — بدون إضافة رصيد"""
         _USED_ORDER_IDS.add(order_id)
-        try:
+        if hasattr(self.db, 'save_binance_payment'):
             self.db.save_binance_payment(uid, order_id, paid, credit)
-        except Exception as e:
-            logger.warning(f"[Binance] تعذّر حفظ السجل: {e}")
 
+    # ══════════════════════════════════════════════════════════
+    #  واجهة المستخدم
+    # ══════════════════════════════════════════════════════════
     async def show_binance_pay(self, cid: int, uid: int):
         pay_id   = self.db.get_setting("binance_pay_id", "").strip()
         min_usdt = self.db.get_setting("binance_min_usdt", "1.00")
@@ -199,6 +196,7 @@ class BinancePayHandler:
     async def prompt_amount(self, call):
         uid = call.from_user.id
         _session_start(uid, step="amount")
+        await self.bot.answer_callback_query(call.id)
         await self.bot.send_message(
             call.message.chat.id,
             "💵 <b>أرسل المبلغ بـ USDT الذي أرسلته عبر Binance Pay:</b>"
@@ -342,18 +340,14 @@ class BinancePayHandler:
             )
             return True
 
-        # ─────────────────────────────────────────────────────
-        # ✅ إضافة الرصيد مرة واحدة فقط عبر approve_payment
-        # ─────────────────────────────────────────────────────
+        # ✅ إضافة الرصيد مرة واحدة فقط
         rate   = float(self.db.get_setting("binance_usdt_rate", "1.00"))
         credit = round(paid_amount * rate, 4)
 
-        # تسجيل Order ID لمنع التكرار (بدون إضافة رصيد هنا)
         self._mark_order_used(uid, order_id, paid_amount, credit)
 
         try:
             req_id = self.db.create_payment_request(uid, "binance_auto", paid_amount)
-            # approve_payment هي الوحيدة التي تضيف الرصيد
             self.db.approve_payment(req_id, credit)
             new_bal = self.db.get_balance(uid)
         except Exception as e:
@@ -395,6 +389,7 @@ class BinancePayHandler:
         except Exception as e:
             logger.warning(f"[Binance] فشل إشعار الأدمن: {e}")
 
+    # دوال للتوافق مع PaymentHandler
     async def handle_order_id(self, message) -> bool:
         return await self.handle_binance_message(message)
 
