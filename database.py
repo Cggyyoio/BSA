@@ -680,20 +680,6 @@ class Database:
     def save_bep20_payment(self, user_id: int, txid: str, amount: float, credit: float):
         self.save_crypto_payment(user_id, txid, 'bep20', amount, credit)
 
-    # 🆕🆕🆕 دوال Binance Pay (تستخدم جدول crypto_payments مع network='binance')
-    def save_binance_payment(self, user_id: int, order_id: str, amount: float, credit: float):
-        """تسجيل عملية دفع Binance Pay لمنع تكرارها"""
-        self.save_crypto_payment(user_id, order_id, 'binance', amount, credit)
-
-    def get_binance_payment(self, order_id: str):
-        """التحقق مما إذا كان Order ID قد استخدم سابقاً"""
-        with self.get_conn() as conn:
-            r = conn.execute(
-                "SELECT * FROM crypto_payments WHERE txid=? AND network='binance'",
-                (order_id,)
-            ).fetchone()
-            return dict(r) if r else None
-
     # ══════════════════════════════════════════════════════
     # الإحصائيات
     # ══════════════════════════════════════════════════════
